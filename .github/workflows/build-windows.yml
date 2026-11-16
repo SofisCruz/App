@@ -1,1 +1,28 @@
+name: Build Windows executable
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: App
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install PyInstaller
+        run: python -m pip install -r requirements-build.txt
+      - name: Build executable
+        run: python -m PyInstaller --noconfirm --clean --onefile --windowed --name Atualizador app.py
+      - name: Upload executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: Atualizador-Windows
+          path: App/dist/Atualizador.exe
 
