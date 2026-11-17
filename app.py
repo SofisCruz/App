@@ -19,6 +19,7 @@ class UpdaterApp(tk.Tk):
         self.backup_root = tk.StringVar()
         self.update_name = tk.StringVar()
         self.summary = tk.StringVar(value="Nenhuma análise realizada.")
+        self.selected_index: int | None = None
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -42,35 +43,25 @@ class UpdaterApp(tk.Tk):
         )
         table_frame = ttk.Frame(self)
         table_frame.pack(fill="both", expand=True, padx=12, pady=(0, 4))
-        columns = ("replace", "copy", "new", "match", "folder", "score")
-        self.table = ttk.Treeview(table_frame, columns=columns, show="headings", selectmode="browse")
-        headings = {
-            "replace": "Substituir",
-            "copy": "Copiar novo",
-            "new": "Ficheiro novo",
-            "match": "Match sugerido",
-            "folder": "Pasta sugerida",
-            "score": "Confiança",
-        }
-        widths = {"replace": 85, "copy": 95, "new": 270, "match": 300, "folder": 300, "score": 90}
-        for column in columns:
-            self.table.heading(column, text=headings[column])
-            self.table.column(column, width=widths[column], anchor="w")
-        self.table.tag_configure("match", background="#d9f2d9")
-        self.table.tag_configure("new", background="#dbeafe")
-        self.table.tag_configure("approved", background="#b7e4c7")
-        self.table.tag_configure("conflict", background="#ffd6d6")
-        vertical_scroll = ttk.Scrollbar(table_frame, orient="vertical", command=self.table.yview)
-        horizontal_scroll = ttk.Scrollbar(table_frame, orient="horizontal", command=self.table.xview)
-        self.table.configure(
+        self.table_canvas = tk.Canvas(table_frame, highlightthickness=0)
+        vertical_scroll = ttk.Scrollbar(table_frame, orient="vertical", command=self.table_canvas.yview)
+        horizontal_scroll = ttk.Scrollbar(table_frame, orient="horizontal", command=self.table_canvas.xview)
+        self.table_canvas.configure(
             yscrollcommand=vertical_scroll.set,
             xscrollcommand=horizontal_scroll.set,
         )
-        self.table.pack(side="left", fill="both", expand=True)
+        self.table_content = ttk.Frame(self.table_canvas)
+        self.table_canvas.create_window((0, 0), window=self.table_content, anchor="nw")
+        self.table_content.bind(
+            "<Configure>",
+            lambda _event: self.table_canvas.configure(
+                scrollregion=self.table_canvas.bbox("all")
+            ),
+        )
+        self.table_canvas.pack(side="left", fill="both", expand=True)
         vertical_scroll.pack(side="right", fill="y")
         horizontal_scroll.pack(side="bottom", fill="x")
-        self.table.bind("<<TreeviewSelect>>", self._show_details)
-        self.table.bind("<ButtonRelease-1>", self._toggle_checkbox)
+        self._build_table_header()
 
         bottom_frame = ttk.Frame(self)
         bottom_frame.pack(fill="x", padx=12, pady=(0, 10))
@@ -80,7 +71,13 @@ class UpdaterApp(tk.Tk):
             anchor="w",
         )
         legend.pack(fill="x", pady=(0, 2))
-        self.details = tk.Text(bottom_frame, height=4, wrap="word", state="disabled")
+        self.details = tk.Text(
+            bottom_frame,
+            height=4,
+            wrap="none",
+            state="disabled",
+            font=("Courier New", 11),
+        )
         self.details.tag_configure("common", foreground="#16803c")
         self.details.tag_configure("difference", foreground="black")
         self.details.pack(fill="x")
@@ -125,79 +122,150 @@ class UpdaterApp(tk.Tk):
         self._refresh_table()
 
     def _refresh_table(self) -> None:
-        self.table.delete(*self.table.get_children())
+        for child in self.table_content.winfo_children():
+            if getattr(child, "_is_table_rows", False):
+                child.destroy()
+        self._update_summary()
+        rows = ttk.Frame(self.table_content)
+        rows._is_table_rows = True
+        rows.pack(fill="x")
+        for index, proposal in enumerate(self.proposals):
+            match = proposal.matches[0] if proposal.matches else None
+            self._build_table_row(rows, index, proposal, match)
+
+    def _update_summary(self) -> None:
         approved_count = sum(proposal.approved for proposal in self.proposals)
         match_count = sum(bool(proposal.matches) for proposal in self.proposals)
+        unchanged_count = sum(proposal.unchanged for proposal in self.proposals)
         new_count = len(self.proposals) - match_count
         self.summary.set(
             f"{len(self.proposals)} ficheiros analisados | "
-            f"{match_count} matches | {new_count} sem match | "
+            f"{match_count - unchanged_count} matches | "
+            f"{unchanged_count} sem alteração | {new_count} sem match | "
             f"{approved_count} aprovados"
         )
-        for index, proposal in enumerate(self.proposals):
-            match = proposal.matches[0] if proposal.matches else None
-            if match:
-                match_name = match.path.name
-                prefix = match.common_prefix
-                match_text = (
-                    f"{match.path.parent.relative_to(Path(self.target_root.get()).resolve())}/"
-                    f"🟩{match_name[:prefix]}{match_name[prefix:]}"
-                )
-            else:
-                match_text = "Nenhum match"
-            folder_text = str(proposal.suggested_directory.relative_to(Path(self.target_root.get()).resolve())) if proposal.suggested_directory else "-"
-            score = f"{match.score:.0%}" if match else f"{proposal.path_score:.0%}"
-            tag = "approved" if proposal.approved else ("match" if match else "new")
-            self.table.insert(
-                "", "end", iid=str(index),
-                values=(
-                    "[x]" if proposal.approved and proposal.action == "replace" else "[ ]",
-                    "[x]" if proposal.approved and proposal.action == "copy" else "[ ]",
-                    str(proposal.relative_path),
-                    match_text,
-                    folder_text,
-                    score,
-                ),
-                tags=(tag,),
+
+    def _build_table_header(self) -> None:
+        header = ttk.Frame(self.table_content)
+        widths = (8, 10, 26, 34, 34, 26, 10)
+        labels = (
+            "Substituir",
+            "Copiar novo",
+            "Pasta de origem",
+            "Ficheiro novo",
+            "Match sugerido",
+            "Pasta sugerida",
+            "Confiança",
+        )
+        for column, (label, width) in enumerate(zip(labels, widths)):
+            ttk.Label(header, text=label, anchor="center", relief="raised").grid(
+                row=0, column=column, sticky="nsew"
             )
+            header.columnconfigure(column, minsize=width * 10, weight=1)
+        header.pack(fill="x")
+
+    def _build_table_row(self, parent, index: int, proposal: FileProposal, match) -> None:
+        row = tk.Frame(parent, background="#eeeeee" if proposal.unchanged else "white")
+        row.pack(fill="x")
+        columns = (8, 10, 26, 34, 34, 26, 10)
+        for column, width in enumerate(columns):
+            row.grid_columnconfigure(column, minsize=width * 10, weight=1)
+        replace_var = tk.BooleanVar(value=proposal.approved and proposal.action == "replace")
+        copy_var = tk.BooleanVar(value=proposal.approved and proposal.action == "copy")
+        tk.Checkbutton(
+            row,
+            variable=replace_var,
+            command=lambda: self._set_row_action(index, "replace", replace_var, copy_var),
+            state="disabled" if proposal.unchanged or not proposal.matches else "normal",
+            background=row["background"],
+        ).grid(row=0, column=0)
+        tk.Checkbutton(
+            row,
+            variable=copy_var,
+            command=lambda: self._set_row_action(index, "copy", replace_var, copy_var),
+            state="disabled" if proposal.unchanged else "normal",
+            background=row["background"],
+        ).grid(row=0, column=1)
+        match_prefix = match.common_prefix if match else 0
+        source_folder = str(proposal.relative_path.parent)
+        if source_folder == ".":
+            source_folder = "."
+        ttk.Label(row, text=source_folder or ".", anchor="w").grid(row=0, column=2, sticky="ew")
+        self._colored_name_cell(row, 3, proposal.relative_path.name, match_prefix if match else 0)
+        self._colored_path_cell(
+            row,
+            4,
+            match.path if match else None,
+            match_prefix if match else 0,
+        )
+        folder = (
+            str(proposal.suggested_directory.relative_to(Path(self.target_root.get()).resolve()))
+            if proposal.suggested_directory else "-"
+        )
+        ttk.Label(row, text=folder, anchor="w").grid(row=0, column=5, sticky="ew")
+        score = "Sem alteração" if proposal.unchanged else (
+            f"{match.score:.0%}" if match else f"{proposal.path_score:.0%}"
+        )
+        ttk.Label(row, text=score, anchor="w").grid(row=0, column=6, sticky="ew")
+        for widget in row.winfo_children():
+            widget.bind("<Button-1>", lambda _event, i=index: self._select_row(i))
+
+    def _colored_path_cell(self, parent, column: int, path: Path | None, common_prefix: int) -> None:
+        text = tk.Text(parent, height=1, width=1, wrap="none", borderwidth=0, highlightthickness=0)
+        text.tag_configure("common", foreground="#16803c")
+        text.tag_configure("difference", foreground="black")
+        if path is None:
+            text.insert("1.0", "Nenhum match")
+        else:
+            self._insert_colored_name(text, path.name, common_prefix)
+        text.configure(state="disabled")
+        text.grid(row=0, column=column, sticky="ew")
+
+    def _colored_name_cell(self, parent, column: int, name: str, common_prefix: int) -> None:
+        text = tk.Text(parent, height=1, width=1, wrap="none", borderwidth=0, highlightthickness=0)
+        text.tag_configure("common", foreground="#16803c")
+        text.tag_configure("difference", foreground="black")
+        self._insert_colored_name(text, name, common_prefix)
+        text.configure(state="disabled")
+        text.grid(row=0, column=column, sticky="ew")
+
+    def _insert_colored_name(self, text: tk.Text, name: str, common_prefix: int) -> None:
+        stem_length = common_prefix
+        text.insert("1.0", name[:stem_length], "common")
+        text.insert("end", name[stem_length:], "difference")
+
+    def _select_row(self, index: int) -> None:
+        self.selected_index = index
+        self._show_details()
 
     def _selected_proposal(self) -> FileProposal | None:
-        selected = self.table.selection()
-        if not selected:
+        if self.selected_index is None:
             return None
-        return self.proposals[int(selected[0])]
+        return self.proposals[self.selected_index]
+
+    def _set_row_action(self, index, action, replace_var, copy_var) -> None:
+        proposal = self.proposals[index]
+        selected = replace_var if action == "replace" else copy_var
+        other = copy_var if action == "replace" else replace_var
+        if selected.get():
+            other.set(False)
+            proposal.action = action
+            proposal.approved = True
+        else:
+            proposal.approved = False
+        self.selected_index = index
+        self._update_summary()
 
     def _toggle_selected_approval(self) -> None:
         proposal = self._selected_proposal()
         if proposal:
             proposal.approved = not proposal.approved
-            self._refresh_table()
+            self._update_summary()
 
     def _approve_matches(self) -> None:
         for proposal in self.proposals:
-            if proposal.matches and proposal.action == "replace":
+            if proposal.matches and not proposal.unchanged and proposal.action == "replace":
                 proposal.approved = True
-        self._refresh_table()
-
-    def _toggle_checkbox(self, event) -> None:
-        if self.table.identify_region(event.x, event.y) != "cell":
-            return
-        column = self.table.identify_column(event.x)
-        if column not in ("#1", "#2"):
-            return
-        proposal = self._selected_proposal()
-        if not proposal:
-            return
-        if column == "#1" and proposal.matches:
-            proposal.action = "replace"
-            proposal.approved = not (
-                proposal.approved and proposal.action == "replace"
-            )
-        elif column == "#2":
-            proposal.action = "copy"
-            proposal.approved = not (
-                proposal.approved and proposal.action == "copy"
-            )
         self._refresh_table()
 
     def _show_details(self, _event=None) -> None:
@@ -207,6 +275,9 @@ class UpdaterApp(tk.Tk):
         self.details.configure(state="normal")
         self.details.delete("1.0", "end")
         if proposal.matches:
+            if proposal.unchanged:
+                self._write_details("Mesmo nome encontrado no destino. Sem alteração de versão.")
+                return
             best_match = proposal.matches[0]
             prefix_length = best_match.common_prefix
             new_name = proposal.new_path.name
