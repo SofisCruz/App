@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import tkinter as tk
+import sys
+import traceback
+import tempfile
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
@@ -21,6 +24,15 @@ class UpdaterApp(tk.Tk):
         self.summary = tk.StringVar(value="Nenhuma análise realizada.")
         self.selected_index: int | None = None
         self._build_ui()
+
+    def write_error_log(self, error: BaseException) -> Path:
+        log_directory = Path(tempfile.gettempdir())
+        log_path = log_directory / "Atualizador.log"
+        log_path.write_text(
+            "".join(traceback.format_exception(error)),
+            encoding="utf-8",
+        )
+        return log_path
 
     def _build_ui(self) -> None:
         paths = ttk.LabelFrame(self, text="Pastas")
@@ -108,6 +120,11 @@ class UpdaterApp(tk.Tk):
             self.backup_root.set(selected)
 
     def _analyze(self) -> None:
+        self.summary.set("A analisar ficheiros...")
+        self.update_idletasks()
+        self.after(50, self._run_analysis)
+
+    def _run_analysis(self) -> None:
         try:
             new_root = Path(self.new_root.get())
             target_root = Path(self.target_root.get())
@@ -116,10 +133,21 @@ class UpdaterApp(tk.Tk):
             if new_root.resolve() == target_root.resolve():
                 raise ValueError("As pastas de origem e destino têm de ser diferentes.")
             self.proposals = analyze(new_root, target_root)
-        except (OSError, ValueError) as error:
-            messagebox.showerror("Não foi possível analisar", str(error))
+        except Exception as error:
+            log_path = self.write_error_log(error)
+            messagebox.showerror(
+                "Não foi possível analisar",
+                f"{error}\n\nDetalhes: {log_path}",
+            )
             return
-        self._refresh_table()
+        try:
+            self._refresh_table()
+        except Exception as error:
+            log_path = self.write_error_log(error)
+            messagebox.showerror(
+                "Não foi possível mostrar a análise",
+                f"{error}\n\nDetalhes: {log_path}",
+            )
 
     def _refresh_table(self) -> None:
         for child in self.table_content.winfo_children():
@@ -129,9 +157,21 @@ class UpdaterApp(tk.Tk):
         rows = ttk.Frame(self.table_content)
         rows._is_table_rows = True
         rows.pack(fill="x")
-        for index, proposal in enumerate(self.proposals):
+        self._render_rows_batch(rows, 0, 20)
+
+    def _render_rows_batch(self, rows, start: int, batch_size: int) -> None:
+        end = min(start + batch_size, len(self.proposals))
+        for index in range(start, end):
+            proposal = self.proposals[index]
             match = proposal.matches[0] if proposal.matches else None
             self._build_table_row(rows, index, proposal, match)
+        if end < len(self.proposals):
+            self.summary.set(
+                f"A mostrar {end}/{len(self.proposals)} ficheiros..."
+            )
+            self.after(10, lambda: self._render_rows_batch(rows, end, batch_size))
+        else:
+            self._update_summary()
 
     def _update_summary(self) -> None:
         approved_count = sum(proposal.approved for proposal in self.proposals)
