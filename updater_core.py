@@ -28,6 +28,11 @@ class FileProposal:
     path_score: float = 0.0
     approved: bool = False
     action: str = "replace"
+    unchanged: bool = False
+
+    def __post_init__(self) -> None:
+        if not hasattr(self, "unchanged"):
+            self.unchanged = False
 
     @property
     def is_new_file(self) -> bool:
@@ -35,6 +40,8 @@ class FileProposal:
 
     @property
     def destination(self) -> Path | None:
+        if self.unchanged:
+            return None
         if self.action == "replace" and self.selected_match:
             return self.selected_match.parent / self.new_path.name
         if self.suggested_directory:
@@ -114,17 +121,43 @@ def analyze(new_root: Path, target_root: Path, *, minimum_match_score: float = 0
         path for path in _directories_under(target_root)
         if path != obsolete_root and obsolete_root not in path.parents
     ]
+    files_by_name: dict[str, list[Path]] = {}
+    files_by_extension: dict[str, list[Path]] = {}
+    for target_file in target_files:
+        files_by_name.setdefault(normalize(target_file.name), []).append(target_file)
+        files_by_extension.setdefault(target_file.suffix.casefold(), []).append(target_file)
     proposals: list[FileProposal] = []
 
     for new_file in _files_under(new_root):
         relative = new_file.relative_to(new_root)
+        exact_matches = files_by_name.get(normalize(new_file.name), [])
+        if exact_matches:
+            proposals.append(
+                FileProposal(
+                    new_path=new_file,
+                    relative_path=relative,
+                    matches=[
+                        Match(
+                            path=target_file,
+                            score=1.0,
+                            common_prefix=len(new_file.stem),
+                        )
+                        for target_file in exact_matches
+                    ],
+                    selected_match=exact_matches[0],
+                    action="skip",
+                    unchanged=True,
+                )
+            )
+            continue
+        candidate_files = files_by_extension.get(new_file.suffix.casefold(), target_files)
         matches = [
             Match(
                 path=target_file,
                 score=filename_score(new_file, target_file),
                 common_prefix=common_prefix_length(new_file.stem, target_file.stem),
             )
-            for target_file in target_files
+            for target_file in candidate_files
         ]
         matches = sorted(
             (match for match in matches if match.score >= minimum_match_score),

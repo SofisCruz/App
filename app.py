@@ -176,7 +176,7 @@ class UpdaterApp(tk.Tk):
     def _update_summary(self) -> None:
         approved_count = sum(proposal.approved for proposal in self.proposals)
         match_count = sum(bool(proposal.matches) for proposal in self.proposals)
-        unchanged_count = sum(proposal.unchanged for proposal in self.proposals)
+        unchanged_count = sum(getattr(proposal, "unchanged", False) for proposal in self.proposals)
         new_count = len(self.proposals) - match_count
         self.summary.set(
             f"{len(self.proposals)} ficheiros analisados | "
@@ -205,7 +205,7 @@ class UpdaterApp(tk.Tk):
         header.pack(fill="x")
 
     def _build_table_row(self, parent, index: int, proposal: FileProposal, match) -> None:
-        row = tk.Frame(parent, background="#eeeeee" if proposal.unchanged else "white")
+        row = tk.Frame(parent, background="#eeeeee" if getattr(proposal, "unchanged", False) else "white")
         row.pack(fill="x")
         columns = (8, 10, 26, 34, 34, 26, 10)
         for column, width in enumerate(columns):
@@ -216,14 +216,14 @@ class UpdaterApp(tk.Tk):
             row,
             variable=replace_var,
             command=lambda: self._set_row_action(index, "replace", replace_var, copy_var),
-            state="disabled" if proposal.unchanged or not proposal.matches else "normal",
+            state="disabled" if getattr(proposal, "unchanged", False) or not proposal.matches else "normal",
             background=row["background"],
         ).grid(row=0, column=0)
         tk.Checkbutton(
             row,
             variable=copy_var,
             command=lambda: self._set_row_action(index, "copy", replace_var, copy_var),
-            state="disabled" if proposal.unchanged else "normal",
+            state="disabled" if getattr(proposal, "unchanged", False) else "normal",
             background=row["background"],
         ).grid(row=0, column=1)
         match_prefix = match.common_prefix if match else 0
@@ -243,7 +243,7 @@ class UpdaterApp(tk.Tk):
             if proposal.suggested_directory else "-"
         )
         ttk.Label(row, text=folder, anchor="w").grid(row=0, column=5, sticky="ew")
-        score = "Sem alteração" if proposal.unchanged else (
+        score = "Sem alteração" if getattr(proposal, "unchanged", False) else (
             f"{match.score:.0%}" if match else f"{proposal.path_score:.0%}"
         )
         ttk.Label(row, text=score, anchor="w").grid(row=0, column=6, sticky="ew")
@@ -304,7 +304,7 @@ class UpdaterApp(tk.Tk):
 
     def _approve_matches(self) -> None:
         for proposal in self.proposals:
-            if proposal.matches and not proposal.unchanged and proposal.action == "replace":
+            if proposal.matches and not getattr(proposal, "unchanged", False) and proposal.action == "replace":
                 proposal.approved = True
         self._refresh_table()
 
@@ -315,7 +315,7 @@ class UpdaterApp(tk.Tk):
         self.details.configure(state="normal")
         self.details.delete("1.0", "end")
         if proposal.matches:
-            if proposal.unchanged:
+            if getattr(proposal, "unchanged", False):
                 self._write_details("Mesmo nome encontrado no destino. Sem alteração de versão.")
                 return
             best_match = proposal.matches[0]
